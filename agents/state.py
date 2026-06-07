@@ -8,8 +8,10 @@ class PolicyState(TypedDict):
     chunks: list            # [{chunk_id, text, metadata}]
     insurer_name: str
     external_research: dict
+    company_profile: dict   # Tavily-powered insurer profile
     section_analyses: dict
     final_report: dict
+    report_markdown: str
     citations: list
     error: Optional[str]
     status: str             # current pipeline stage

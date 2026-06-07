@@ -36,15 +36,9 @@ st.markdown(
   .verdict-BUY_WITH_CAUTION { color: #f59e0b; font-weight: 700; }
   .verdict-REVIEW_NEEDED    { color: #ef4444; font-weight: 700; }
   .verdict-AVOID            { color: #dc2626; font-weight: 900; }
-  .citation-badge {
-    background: #1e2d45; border: 1px solid #00d4ff33;
-    border-radius: 4px; padding: 2px 8px;
-    font-size: 11px; color: #00d4ff; font-family: monospace;
-  }
-  .red-flag {
-    background: #ef444410; border-left: 3px solid #ef4444;
-    padding: 8px 12px; margin: 4px 0; border-radius: 2px;
-  }
+  .risk-LOW    { color: #10b981; font-weight: 700; }
+  .risk-MEDIUM { color: #f59e0b; font-weight: 700; }
+  .risk-HIGH   { color: #ef4444; font-weight: 700; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -52,7 +46,7 @@ st.markdown(
 
 st.markdown("## ⬡ InsureIQ — AI Insurance Policy Analyst")
 st.caption(
-    "Upload any insurance policy PDF for a full cited analysis · Powered by local AI"
+    "Upload any insurance policy PDF for a full cited analysis · Powered by local AI + Tavily company research"
 )
 
 uploaded_file = st.file_uploader(
@@ -78,11 +72,12 @@ if uploaded_file:
             status_text = st.empty()
 
             stages = [
-                ("ocr_complete",          "👁  OCR Extraction",        25),
-                ("rag_complete",          "🗄  Building Vector Store",  50),
-                ("web_research_complete", "🌐  External Research",      65),
-                ("analysis_complete",     "🤖  Deep Analysis",          85),
-                ("complete",              "📋  Compiling Report",      100),
+                ("ocr_complete",              "👁  OCR Extraction",          20),
+                ("rag_complete",              "🗄  Building Vector Store",   40),
+                ("web_research_complete",     "🌐  External Research",       55),
+                ("analysis_complete",         "🤖  Deep Section Analysis",   80),
+                ("company_profile_complete",  "🏢  Company Profile",         92),
+                ("complete",                  "📋  Compiling Report",       100),
             ]
             stage_map = {s[0]: (s[1], s[2]) for s in stages}
 
@@ -93,8 +88,10 @@ if uploaded_file:
                 "chunks": [],
                 "insurer_name": "",
                 "external_research": {},
+                "company_profile": {},
                 "section_analyses": {},
                 "final_report": {},
+                "report_markdown": "",
                 "citations": [],
                 "error": None,
                 "status": "starting",
@@ -116,6 +113,7 @@ if uploaded_file:
                 progress_bar.progress(100)
                 status_text.text("✅ Analysis complete!")
                 st.session_state["report"] = final_state.get("final_report", {})
+                st.session_state["markdown"] = final_state.get("report_markdown", "")
             except Exception as e:
                 st.error(f"Pipeline error: {e}")
             finally:
@@ -124,10 +122,11 @@ if uploaded_file:
                 except OSError:
                     pass
 
-if "report" in st.session_state and st.session_state["report"]:
+# ── Report Display ──────────────────────────────────────────────────
+if st.session_state.get("report"):
     report = st.session_state["report"]
-    summary = report.get("executive_summary", {})
-    sections = report.get("sections", {})
+    markdown = st.session_state.get("markdown", "")
+    headline = report.get("headline", {})
     session_id = st.session_state.get("last_session_id", "session")
 
     st.divider()
@@ -135,7 +134,7 @@ if "report" in st.session_state and st.session_state["report"]:
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        score = summary.get("analyst_score", 0)
+        score = headline.get("overall_rating", 0)
         color = (
             "#10b981" if score >= 75 else "#f59e0b" if score >= 55 else "#ef4444"
         )
@@ -144,61 +143,91 @@ if "report" in st.session_state and st.session_state["report"]:
             f"<span style='font-size:14px'>/100</span></h2>",
             unsafe_allow_html=True,
         )
-        st.caption("Analyst Score")
+        st.caption("Overall Rating")
     with col2:
-        verdict = summary.get("verdict", "UNKNOWN")
+        verdict = headline.get("recommendation", "UNKNOWN")
         st.markdown(
             f"<p class='verdict-{verdict}'>{verdict.replace('_', ' ')}</p>",
             unsafe_allow_html=True,
         )
-        st.caption("Verdict")
+        st.caption("Recommendation")
     with col3:
-        st.metric("Insurer", summary.get("insurer_name", "—")[:25])
+        risk = headline.get("risk_level", "UNKNOWN")
+        st.markdown(
+            f"<p class='risk-{risk}'>{risk}</p>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Risk Level")
     with col4:
-        st.metric("Citations", len(report.get("all_citations", [])))
+        st.metric("Insurer", (headline.get("insurer_name") or "—")[:25])
 
-    flags = summary.get("key_red_flags", [])
-    if flags:
-        st.markdown("#### ⚠️ Key Red Flags")
-        for flag in flags:
-            st.markdown(
-                f"<div class='red-flag'>⚠️ {flag}</div>", unsafe_allow_html=True
+    tab_report, tab_company, tab_json = st.tabs(
+        ["📄 Full Report", "🏢 Company Profile", "🧾 Raw JSON"]
+    )
+
+    with tab_report:
+        if markdown:
+            st.markdown(markdown)
+        else:
+            st.info("No report content available.")
+
+    with tab_company:
+        profile = report.get("company_profile", {})
+        if not profile or not profile.get("available"):
+            reason = profile.get("reason") if isinstance(profile, dict) else None
+            st.warning(
+                "Company profile unavailable. "
+                f"{('Reason: ' + reason) if reason else 'Set TAVILY_API_KEY in .env to enable.'}"
             )
+        else:
+            summary = profile.get("summary", {})
+            st.markdown(f"**Insurer:** {profile.get('insurer', 'Unknown')}")
+            st.markdown(f"**Trust Score:** {summary.get('trust_score', '—')}/100")
 
-    section_labels = {
-        "executive_summary": "📋 Summary",
-        "coverage_benefits": "✅ Benefits",
-        "exclusions":        "❌ Exclusions",
-        "waiting_periods":   "⏳ Waiting",
-        "premium_analysis":  "💰 Premium",
-        "claims_process":    "📝 Claims",
-        "risk_assessment":   "⚠️ Risks",
-        "policy_conditions": "📜 Conditions",
-    }
+            for k, label in [
+                ("company_overview",          "Company Overview"),
+                ("claim_settlement_ratio",    "Claim Settlement Ratio"),
+                ("customer_reviews_summary",  "Customer Reviews"),
+                ("ratings",                   "Ratings"),
+                ("market_share",              "Market Share"),
+                ("credibility",               "Credibility"),
+                ("overall_assessment",        "Overall Assessment"),
+            ]:
+                st.markdown(f"#### {label}")
+                st.markdown(summary.get(k, "Not found"))
 
-    if sections:
-        tabs = st.tabs([section_labels.get(k, k) for k in sections.keys()])
-        for tab, (_, section_data) in zip(tabs, sections.items()):
-            with tab:
-                if isinstance(section_data, dict):
-                    if section_data.get("summary"):
-                        st.markdown(section_data["summary"])
-                    for finding in section_data.get("findings", []):
-                        with st.expander(
-                            f"📌 {finding.get('claim', 'Finding')[:80]}"
-                        ):
-                            st.write(finding.get("claim", ""))
-                            if "citation" in finding:
-                                st.markdown(
-                                    f"<span class='citation-badge'>"
-                                    f"{finding['citation']}</span>",
-                                    unsafe_allow_html=True,
-                                )
+            disputes = summary.get("recent_disputes") or []
+            if disputes:
+                st.markdown("#### Recent Disputes")
+                for d in disputes:
+                    st.markdown(f"- {d}")
+
+            with st.expander("🔗 Sources Consulted (Tavily)"):
+                for facet, body in profile.get("facets", {}).items():
+                    for src in body.get("sources", [])[:3]:
+                        title = src.get("title", "(untitled)")
+                        url = src.get("url", "")
+                        st.markdown(
+                            f"- _{facet.replace('_', ' ').title()}_ — [{title}]({url})"
+                        )
+
+    with tab_json:
+        st.json(report)
 
     st.divider()
-    st.download_button(
-        label="⬇️ Download Full Report (JSON)",
-        data=json.dumps(report, indent=2),
-        file_name=f"insureiq_report_{session_id[:8]}.json",
-        mime="application/json",
-    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.download_button(
+            label="⬇️ Download Report (Markdown)",
+            data=markdown.encode("utf-8") if markdown else b"",
+            file_name=f"insureiq_report_{session_id[:8]}.md",
+            mime="text/markdown",
+            disabled=not markdown,
+        )
+    with col_b:
+        st.download_button(
+            label="⬇️ Download Report (JSON)",
+            data=json.dumps(report, indent=2),
+            file_name=f"insureiq_report_{session_id[:8]}.json",
+            mime="application/json",
+        )
