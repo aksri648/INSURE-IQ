@@ -10,7 +10,9 @@
       "Bash(python3 *)",
       "Bash(git -c user.email=akshat@local -c user.name=akshat commit -m \"Add Colab notebook: clone repo + Ollama + Streamlit + Cloudflare tunnel\")",
       "Bash(git push *)",
-      "Bash(git -c user.email=akshat@local -c user.name=akshat commit -m 'Restructure analyst into 18-section consumer report + Tavily company profile agent *)"
+      "Bash(git -c user.email=akshat@local -c user.name=akshat commit -m 'Restructure analyst into 18-section consumer report + Tavily company profile agent *)",
+      "Bash(git -c user.email=akshat@local -c user.name=akshat commit -m \"Rewrite docs for v2 system \\(6 nodes, 18-section report, Tavily company profile\\)\")",
+      "Bash(git -c user.email=akshat@local -c user.name=akshat commit -m 'Validator agent + LaTeX PDF report + 3-column UI with live agent flowchart *)"
     ]
   }
 }

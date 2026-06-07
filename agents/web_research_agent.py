@@ -24,7 +24,8 @@ def web_research_node(state: PolicyState) -> PolicyState:
         return {**state,
                 "external_research": {},
                 "insurer_name": insurer_name,
-                "status": "web_research_complete"}
+                "status": "web_research_complete",
+                "active_node": "web_research"}
 
     try:
         from tavily import TavilyClient
@@ -33,7 +34,8 @@ def web_research_node(state: PolicyState) -> PolicyState:
         return {**state,
                 "external_research": {},
                 "insurer_name": insurer_name,
-                "status": "web_research_complete"}
+                "status": "web_research_complete",
+                "active_node": "web_research"}
 
     client = TavilyClient(api_key=tavily_key)
     print(f"[Web Research] Researching: {insurer_name}")

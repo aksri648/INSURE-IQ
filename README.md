@@ -1,15 +1,16 @@
 # ⬡ InsureIQ — AI Insurance Policy Analyst
 
-**Local-first, multi-agent RAG pipeline that turns any insurance policy PDF into a fully cited consumer report — plus a Tavily-powered company profile of the insurer.**
+**Local-first, hallucination-proof multi-agent RAG pipeline. Upload an insurance policy PDF, get a fully-cited LaTeX-compiled PDF report with every finding tagged TRUSTED or NEEDS HUMAN REVIEW by a deterministic validator agent.**
 
-Built on **LangGraph · Ollama · ChromaDB · Tavily · Streamlit**.
+Built on **LangGraph · Ollama · ChromaDB · Tavily · Streamlit · Tectonic (LaTeX→PDF)**.
 
-- 100 % local LLM inference (your PDF never leaves the machine).
-- 6 LangGraph nodes, sequential VRAM-safe model loading.
-- 18-section consumer report rendered as Markdown + structured JSON.
-- New ★ **Company Profile** node uses Tavily to research the insurer's claim settlement ratio, recent disputes, customer reviews, ratings, market share, and overall credibility.
+- 100% local LLM inference; PDF never leaves the host.
+- **7 LangGraph nodes**, sequential VRAM-safe model loading.
+- **Validator agent** does a deterministic substring check on every analyst claim against the policy text — no LLM in the verification loop, so the validator itself cannot hallucinate.
+- Final report is rendered as **LaTeX → PDF**. The Streamlit UI shows the source on the right and exposes a single **Download Report PDF** button.
+- Tavily-powered **Company Profile** agent: claim settlement ratio, recent disputes, customer reviews, ratings, market share, credibility, trust score.
 
-📓 Want to run it on Google Colab + Cloudflare Tunnel instead?
+📓 Run it on Colab + Cloudflare Tunnel:
 **[Open `insureiq_colab.ipynb` in Colab](https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb)** — full guide in [`insureiq_colab_deployment.md`](./insureiq_colab_deployment.md).
 
 ---
@@ -19,22 +20,44 @@ Built on **LangGraph · Ollama · ChromaDB · Tavily · Streamlit**.
 ```
 PDF
  ▼
-[OCR Agent]            llava → JSON per page → offload
+[OCR Agent]              llava → per-page JSON → offload
  ▼
-[RAG Agent]            clause chunk → nomic-embed → ChromaDB
+[RAG Indexer]            clause chunk → nomic-embed → ChromaDB + chunk_index
  ▼
-[Web Research]         Tavily light lookups (insurer, regulatory)
+[Web Research]           Tavily light lookups (insurer, regulatory)
  ▼
-[Analyst Agent]        deepseek-r1 → 18 grounded section JSONs → offload
+[Analyst Agent]          deepseek-r1 → verifiable findings only
+                         each finding ships a verbatim_quote + chunk_id
  ▼
-[Company Profile] ★    Tavily ×7 facets → LLM synthesis → trust score
+[Company Profile] ★      Tavily ×7 facets → LLM synthesis → trust score
  ▼
-[Report Compiler]      Markdown + structured JSON
+[Validator Agent] ★      Deterministic substring check on every claim.
+                         Tags each finding TRUSTED or NEEDS_HUMAN_REVIEW.
+                         Drops findings whose quote isn't in the policy.
  ▼
-Streamlit UI           tabs · downloads (.md, .json)
+[Report Compiler]        LaTeX source → tectonic → PDF bytes
+ ▼
+Streamlit UI             Left: upload · Middle: live agent flowchart
+                         Right: LaTeX viewer + Download Report PDF
 ```
 
 For the full architecture see [`insureiq_architecture_diagram.md`](./insureiq_architecture_diagram.md).
+
+---
+
+## Hallucination Defense
+
+The system is designed so that no LLM output reaches the report unless it can be tied to a real piece of policy text:
+
+| Stage | Constraint |
+|---|---|
+| Analyst prompt | Returns findings only. Each finding **must** include `verbatim_quote` (an exact substring of the cited chunk) + `chunk_id` + `page`. No free-form prose fields. |
+| Analyst parsing | Findings missing `chunk_id`, `verbatim_quote`, or with an unknown label are dropped before they reach validation. |
+| Validator | Pure Python. Normalises whitespace and case, then checks if `verbatim_quote` is literally inside the cited chunk. **No LLM call here** — the verifier itself cannot hallucinate. |
+| Tagging | **TRUSTED**: exact substring match + page consistency. **NEEDS_HUMAN_REVIEW**: only fuzzy word-overlap match (≥70%), or page mismatch. **Dropped**: quote not in the cited chunk at all. |
+| Compiler | Only consumes validated findings. Each finding renders the original verbatim quote in italics under the consumer-facing claim, plus a coloured TRUSTED / NEEDS HUMAN REVIEW tag and the chunk/page reference. |
+
+The result: any line in the PDF either matches a real run of characters in the policy, or it has a visible amber tag warning the reader to verify it manually.
 
 ---
 
@@ -44,30 +67,44 @@ For the full architecture see [`insureiq_architecture_diagram.md`](./insureiq_ar
 ai_insurance/
 ├── agents/
 │   ├── state.py                    # PolicyState TypedDict
-│   ├── ocr_agent.py                # LLaVA → JSON per page → offload
-│   ├── rag_agent.py                # Chunker + ChromaDB + retrieval
-│   ├── web_research_agent.py       # Heuristic insurer + light Tavily
-│   ├── analyst_agent.py            # 18-section grounded prompts
-│   ├── company_profile_agent.py    # Tavily ×7 facets + LLM synthesis  ★
-│   └── compiler_agent.py           # Markdown report + structured JSON
+│   ├── ocr_agent.py                # LLaVA → per-page JSON → offload
+│   ├── rag_agent.py                # Chunker + ChromaDB + chunk_index
+│   ├── web_research_agent.py       # Insurer name + light Tavily
+│   ├── analyst_agent.py            # Verifiable-only findings
+│   ├── company_profile_agent.py    # Tavily ×7 facets + LLM synthesis
+│   ├── validator_agent.py          # ★ Deterministic verification
+│   └── compiler_agent.py           # LaTeX builder + tectonic
 ├── utils/
-│   └── model_config.py             # VRAM-aware model selection
-├── graph.py                        # LangGraph wiring (6 nodes)
-├── app.py                          # Streamlit UI (3 tabs + downloads)
+│   ├── model_config.py             # VRAM-aware model selection
+│   └── pdf_builder.py              # ★ tectonic / pdflatex / reportlab fallback
+├── graph.py                        # LangGraph wiring (7 nodes)
+├── app.py                          # Streamlit UI (3 columns + live flowchart)
 ├── requirements.txt
-├── setup.sh                        # One-shot local setup
+├── setup.sh                        # Ollama + tectonic + venv + deps
 ├── run.sh                          # Launch Streamlit
 ├── insureiq_colab.ipynb            # Colab + Cloudflare Tunnel notebook
-├── insureiq_colab_deployment.md    # Colab deployment guide
+├── insureiq_colab_deployment.md
 ├── insureiq_architecture_diagram.md
-└── README.md  (this file)
+└── README.md
 ```
+
+---
+
+## Streamlit UI
+
+Three columns:
+
+| Column | Contents |
+|---|---|
+| **Left** | PDF upload + **Analyze Policy** button. Once complete, shows insurer / rating / risk / verdict + the validator counts. |
+| **Middle** | Vertical agent flowchart — one rounded box per node. The currently-executing node has a **glowing animated cyan border**. Completed nodes turn green. Pending nodes stay grey. |
+| **Right** | Read-only **LaTeX source viewer** + a single **⬇️ Download Report PDF** button below it. No markdown view, no JSON view — just the compiled PDF you'll actually share. |
 
 ---
 
 ## Run It Locally
 
-Requires: Linux, Python 3.10+, NVIDIA GPU (T4-class or better) with recent driver, `curl`, `git`.
+Requires: Linux, Python 3.10+, NVIDIA GPU with recent driver, `curl`, `git`.
 
 ### 1. One-time setup
 
@@ -78,25 +115,22 @@ cd INSURE-IQ
 ```
 
 `setup.sh` will:
+- Install **tectonic** (self-contained LaTeX engine) — required to render the PDF.
 - Install Ollama and start the server on `:11434`.
-- Detect VRAM and pull the right model sizes:
+- Pull VRAM-sized models:
   - `> 35 GiB`: `llava:13b` + `deepseek-r1:14b` + `nomic-embed-text`
   - otherwise: `llava:7b`  + `deepseek-r1:7b`  + `nomic-embed-text`
-- Create a Python `.venv`, install `requirements.txt`.
-- Write `/tmp/model_config.env` with the resolved model names.
-- Copy `.env.example` to `.env`.
+- Create `.venv`, install `requirements.txt`, write `/tmp/model_config.env`.
+- Scaffold `.env` from `.env.example`.
 
 ### 2. (Recommended) Add your Tavily key
 
-Edit `.env`:
-
 ```
+# .env
 TAVILY_API_KEY=tvly-xxxxxxxxxxxx
 ```
 
-Without a key the **Web Research** and **Company Profile** agents short-circuit cleanly (pipeline still completes; profile tab shows "unavailable").
-
-Get a free key at <https://tavily.com>.
+Without it, the Web Research and Company Profile agents short-circuit cleanly.
 
 ### 3. Launch
 
@@ -104,98 +138,107 @@ Get a free key at <https://tavily.com>.
 ./run.sh
 ```
 
-Open <http://localhost:8501>, drop a policy PDF, click **Analyze Policy**.
+Open <http://localhost:8501> → drop a PDF → click **Analyze Policy** → watch the flowchart light up → press **Download Report PDF**.
 
 ---
 
 ## Manual Setup (skip `setup.sh`)
 
 ```bash
-# 1. Ollama
+# 1. tectonic (LaTeX → PDF)
+curl -fsSL https://drop-sh.fullyjustified.net | sh
+sudo mv tectonic /usr/local/bin/
+
+# 2. Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 nohup ollama serve >/tmp/ollama.log 2>&1 &
 ollama pull nomic-embed-text
 ollama pull llava:7b
 ollama pull deepseek-r1:7b
 
-# 2. Python
+# 3. Python
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Optional: Tavily
+# 4. Optional: Tavily
 echo "TAVILY_API_KEY=tvly-..." > .env
 
-# 4. Run
+# 5. Run
 streamlit run app.py
 ```
+
+If `tectonic` is unavailable the compiler falls back to `pdflatex`, and if neither is available it produces a notice PDF (via reportlab) that contains the LaTeX source — the Download button always returns something.
 
 ---
 
 ## The Report
 
-Every analysis produces the same Markdown structure:
+Every analysis produces the same structured LaTeX document, rendered identically to a markdown viewer:
 
 ```
-# Your Insurance Policy Review
-## Quick Summary  → At a Glance · Key Takeaways
-# Basic Policy Information
-# What Is Covered?
-# How Much Protection Do You Actually Get?
-# What Is NOT Covered?
-# When Does Coverage Start?            (waiting periods)
-# What Costs Will You Still Pay Yourself?
-# Is the Premium Worth It?
-# How Does the Claim Process Work?
-# Can the Policy Be Renewed or Cancelled?
-# Important Legal Terms You Should Know
-# Important Definitions That Could Affect Claims
-# Potential Risks and Concerns
-# How Likely Is a Claim to Be Rejected?
-# Real-Life Examples
-# Hidden Surprises We Found
-# How This Policy Compares to Others
-# Plain English Summary
-# Final Verdict
-   Detailed Scores (8 axes, each /10)
-   Overall Rating /100 · Confidence · Recommendation
-# Company Profile  ★  (Tavily research)
-   Overview · Claim Settlement Ratio · Recent Disputes ·
-   Customer Reviews · Ratings · Market Share · Credibility ·
-   Overall Assessment · Trust Score /100 · Sources Consulted
+Your Insurance Policy Review
+  Quick Summary  → At a Glance · Key Takeaways
+Basic Policy Information
+What Is Covered?
+How Much Protection Do You Actually Get?
+What Is NOT Covered?
+When Does Coverage Start?            (waiting periods)
+What Costs Will You Still Pay Yourself?
+Is the Premium Worth It?
+How Does the Claim Process Work?
+Can the Policy Be Renewed or Cancelled?
+Important Legal Terms You Should Know
+Important Definitions That Could Affect Claims
+Potential Risks and Concerns
+How Likely Is a Claim to Be Rejected?
+Hidden Surprises We Found
+Final Verdict
+  Detailed Scores · Overall Rating · Risk · Confidence · Recommendation
+Company Profile  ★  (Tavily research)
+  Overview · CSR · Disputes · Reviews · Ratings · Market Share ·
+  Credibility · Overall Assessment · Trust Score · Sources Consulted
 ```
 
-### Citations
+### Inline tag styling
 
-Every analyst claim must cite a chunk:
+Each finding renders like:
 
 ```
-[Source: chunk_0042, Page 12, General Exclusions]
-[EXTERNAL: CRISIL AAA financial strength rating]
+• Pre-existing diseases are excluded for 48 months from inception.
+  [TRUSTED] [CIT-007 • chunk_0042 • Page 12 • General Exclusions]
+  "pre-existing diseases excluded for 48 months from inception"
 ```
 
-If a piece of information is not in the PDF the analyst is required to write exactly `"Not specified in the policy"` — no fabrication.
+vs. an unverifiable one:
+
+```
+• Maternity benefits are available after 24 months.
+  [NEEDS HUMAN REVIEW] [CIT-018 • chunk_0061 • Page 21]
+  "maternity benefit after twenty four month wait"
+  Reviewer note: Quote paraphrased (62% word overlap)
+```
+
+The PDF's "How to Read This Report" section explains the legend to the consumer.
 
 ### Verdict bands
 
 | Overall Rating | Recommendation     | Risk Level |
 |---|---|---|
-| 75–100 | `GOOD_VALUE`        | `LOW`    |
-| 55–74  | `BUY_WITH_CAUTION`  | `MEDIUM` |
-| 35–54  | `REVIEW_NEEDED`     | `HIGH`   |
+| 75–100 | `GOOD VALUE`        | `LOW`    |
+| 55–74  | `BUY WITH CAUTION`  | `MEDIUM` |
+| 35–54  | `REVIEW NEEDED`     | `HIGH`   |
 | 0–34   | `AVOID`             | `HIGH`   |
 
----
+Confidence is computed from the validator's TRUSTED ratio:
 
-## The Streamlit UI
+| Trusted/Total | Confidence |
+|---|---|
+| ≥ 0.8 | `HIGH` |
+| ≥ 0.5 | `MEDIUM` |
+| < 0.5 | `LOW` |
 
-Three tabs:
-
-- **📄 Full Report** — renders the Markdown report verbatim.
-- **🏢 Company Profile** — structured Tavily research with collapsible source URLs.
-- **🧾 Raw JSON** — the full structured report (for programmatic consumers).
-
-Two download buttons: `.md` (consumer report) and `.json` (structured report with citations).
+The overall rating is also penalised (up to −15) when many findings need review.
 
 ---
 
@@ -210,16 +253,6 @@ Two download buttons: `.md` (consumer report) and `.json` (structured report wit
 | `INSUREIQ_MODEL_CONFIG` | Path to resolved-model config file | `/tmp/model_config.env` |
 
 `.env` is loaded by `app.py` via `python-dotenv`.
-
----
-
-## Design Notes
-
-- **Sequential model loading.** OCR offloads (`ollama.generate(..., keep_alive=0)`) before the analyst loads. The analyst model is reused by the Company Profile node for snippet synthesis, then offloaded once. Fits on a single 15 GB T4.
-- **Per-section retrieval.** The analyst defines 18 distinct queries — exclusions retrieve "exclusions not covered excluded conditions limitations", waiting periods retrieve "waiting period initial cooling pre-existing disease PED maternity", etc. This keeps the prompt context tight and grounded.
-- **Strict per-section JSON schemas.** Each section returns a fixed shape that maps 1-to-1 to a markdown heading. The compiler walks the keys and fills the template — no string-glue templating from LLM prose.
-- **Tavily company profile is a real agent.** It issues 7 advanced searches, preserves source URLs, and runs a second LLM pass for synthesis. The trust score and "Recent Disputes" bullets are derived from public sources, not the policy.
-- **Graceful degradation.** Missing Tavily key → skip cleanly. Missing chunks → "Not specified in the policy". Malformed LLM JSON → preserved error string + empty schema.
 
 ---
 

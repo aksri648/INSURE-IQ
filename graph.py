@@ -6,7 +6,30 @@ from agents.compiler_agent import report_compiler_node
 from agents.ocr_agent import ocr_agent_node
 from agents.rag_agent import embed_and_store_node
 from agents.state import PolicyState
+from agents.validator_agent import validator_agent_node
 from agents.web_research_agent import web_research_node
+
+
+# Ordered for UI display (left -> right flowchart).
+NODE_ORDER = [
+    "ocr",
+    "embed_store",
+    "web_research",
+    "analyst",
+    "company_profile",
+    "validator",
+    "compiler",
+]
+
+NODE_LABELS = {
+    "ocr":             "OCR Agent",
+    "embed_store":     "RAG Indexer",
+    "web_research":    "Web Research",
+    "analyst":         "Analyst Agent",
+    "company_profile": "Company Profile",
+    "validator":       "Validator Agent",
+    "compiler":        "Report Compiler",
+}
 
 
 def build_graph():
@@ -17,6 +40,7 @@ def build_graph():
     g.add_node("web_research",    web_research_node)
     g.add_node("analyst",         analyst_agent_node)
     g.add_node("company_profile", company_profile_node)
+    g.add_node("validator",       validator_agent_node)
     g.add_node("compiler",        report_compiler_node)
 
     g.set_entry_point("ocr")
@@ -24,7 +48,8 @@ def build_graph():
     g.add_edge("embed_store",     "web_research")
     g.add_edge("web_research",    "analyst")
     g.add_edge("analyst",         "company_profile")
-    g.add_edge("company_profile", "compiler")
+    g.add_edge("company_profile", "validator")
+    g.add_edge("validator",       "compiler")
     g.add_edge("compiler",        END)
 
     return g.compile()

@@ -126,7 +126,8 @@ def company_profile_node(state: PolicyState) -> PolicyState:
                     "available": False,
                     "reason": "TAVILY_API_KEY not configured",
                 },
-                "status": "company_profile_complete"}
+                "status": "company_profile_complete",
+                "active_node": "company_profile"}
 
     try:
         from tavily import TavilyClient
@@ -138,7 +139,8 @@ def company_profile_node(state: PolicyState) -> PolicyState:
                     "available": False,
                     "reason": "tavily-python not installed",
                 },
-                "status": "company_profile_complete"}
+                "status": "company_profile_complete",
+                "active_node": "company_profile"}
 
     client = TavilyClient(api_key=tavily_key)
     print(f"[Company Profile] Researching insurer: {insurer}")

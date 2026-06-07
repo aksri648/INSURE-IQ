@@ -74,4 +74,7 @@ def ocr_agent_node(state: PolicyState) -> PolicyState:
         pass
 
     print(f"[OCR Agent] Done. Extracted {total_pages} pages.")
-    return {**state, "ocr_text": ocr_results, "status": "ocr_complete"}
+    return {**state,
+            "ocr_text": ocr_results,
+            "status": "ocr_complete",
+            "active_node": "ocr"}

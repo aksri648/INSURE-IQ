@@ -83,8 +83,22 @@ def embed_and_store_node(state: PolicyState) -> PolicyState:
             metadatas=[chunk["metadata"]],
         )
 
+    # Build verbatim chunk index for the validator (chunk_id -> text + meta).
+    chunk_index = {
+        c["chunk_id"]: {
+            "text": c["text"],
+            "page": c["metadata"].get("page"),
+            "section": c["metadata"].get("section", ""),
+        }
+        for c in chunks
+    }
+
     print(f"[RAG] Stored {len(chunks)} chunks in ChromaDB.")
-    return {**state, "chunks": chunks, "status": "rag_complete"}
+    return {**state,
+            "chunks": chunks,
+            "chunk_index": chunk_index,
+            "status": "rag_complete",
+            "active_node": "embed_store"}
 
 
 def retrieve_chunks(session_id: str, query: str, n_results: int = 8) -> list:

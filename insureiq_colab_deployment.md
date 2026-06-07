@@ -1,41 +1,39 @@
 # InsureIQ — Google Colab + Cloudflare Tunnel Deployment Guide
-### v2.0 · Repo-cloned · 6-Node Pipeline · 18-Section Report · Tavily Company Profile
+### v3.0 · Repo-cloned · 7-Node Pipeline · Deterministic Validator · LaTeX → PDF
 
-> Run the full multi-agent InsureIQ pipeline on Colab's free/Pro GPU and expose Streamlit publicly via Cloudflare Tunnel — no server, no domain, no cost.
+> Run the full hallucination-proof InsureIQ pipeline on Colab's free/Pro GPU and expose the Streamlit app publicly via Cloudflare Tunnel — no server, no domain, no cost.
 >
-> This guide is paired with the **ready-to-run notebook** in the repo: [`insureiq_colab.ipynb`](./insureiq_colab.ipynb).
-> Open it directly in Colab: <https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb>
+> Paired notebook: [`insureiq_colab.ipynb`](./insureiq_colab.ipynb).
+> Open in Colab: <https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb>
 
 ---
 
 ## ARCHITECTURE ON COLAB
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│              GOOGLE COLAB  (T4 / A100 GPU)                       │
-│                                                                  │
-│   git clone github.com/aksri648/INSURE-IQ  →  /content/INSURE-IQ │
-│                                                                  │
-│  ┌─────────────┐   ┌──────────────┐   ┌────────────────────┐    │
-│  │   Ollama    │   │   ChromaDB   │   │   Streamlit  :8501 │    │
-│  │   :11434    │   │  (in-mem)    │   │  app.py + graph.py │    │
-│  │ llava +     │   │  per-session │   │  6 LangGraph nodes │    │
-│  │ deepseek-r1 │   │  collection  │   │                    │    │
-│  │ nomic-embed │   │              │   │                    │    │
-│  └─────────────┘   └──────────────┘   └─────────┬──────────┘    │
-│                                                 │                │
-└─────────────────────────────────────────────────┼────────────────┘
-                                                  │
-                                       ┌──────────▼──────────┐
-                                       │  cloudflared tunnel │
-                                       │  (trycloudflare.com)│
-                                       └──────────┬──────────┘
-                                                  │ Public HTTPS
-                                                  ▼
-                                          Anyone on internet
+┌────────────────────────────────────────────────────────────────────────┐
+│              GOOGLE COLAB  (T4 / A100 GPU)                             │
+│                                                                        │
+│   git clone github.com/aksri648/INSURE-IQ  →  /content/INSURE-IQ      │
+│                                                                        │
+│  ┌─────────────┐ ┌──────────────┐ ┌──────────────┐ ┌───────────────┐  │
+│  │   Ollama    │ │   ChromaDB   │ │   Tectonic   │ │   Streamlit   │  │
+│  │   :11434    │ │  (in-mem)    │ │  LaTeX→PDF   │ │   :8501       │  │
+│  │ llava +     │ │  per-session │ │  engine      │ │  3-column UI  │  │
+│  │ deepseek-r1 │ │              │ │              │ │  + flowchart  │  │
+│  │ nomic-embed │ │ chunk_index  │ │              │ │  + PDF dl     │  │
+│  └─────────────┘ └──────────────┘ └──────────────┘ └───────┬───────┘  │
+│                                                            │           │
+└────────────────────────────────────────────────────────────┼───────────┘
+                                                             │
+                                                  ┌──────────▼──────────┐
+                                                  │  cloudflared tunnel │
+                                                  │  (trycloudflare.com)│
+                                                  └──────────┬──────────┘
+                                                             │ Public HTTPS
+                                                             ▼
+                                                     Anyone on internet
 ```
-
-The Colab runtime hosts everything; cloudflared exposes the local Streamlit port as a public `https://<random>.trycloudflare.com` URL.
 
 ---
 
@@ -44,36 +42,30 @@ The Colab runtime hosts everything; cloudflared exposes the local Streamlit port
 | Plan  | GPU  | VRAM   | Suitability |
 |-------|------|--------|-------------|
 | Free  | T4   | 15 GB  | ✅ Works — uses 7B models |
-| Pro   | A100 | 40 GB  | ✅ Best — uses 14B+ models |
+| Pro   | A100 | 40 GB  | ✅ Best — uses 14B models |
 | Pro+  | A100 | 80 GB  | ✅ Overkill but smooth |
 
-`utils/model_config.py` auto-picks model sizes from detected VRAM:
-
-| VRAM   | OCR Model    | Analyst / Synthesis Model | Embedding |
-|--------|--------------|---------------------------|-----------|
-| ≤ 35 GB | `llava:7b`   | `deepseek-r1:7b`         | `nomic-embed-text` |
-| > 35 GB | `llava:13b`  | `deepseek-r1:14b`        | `nomic-embed-text` |
-
-Override with env vars `OCR_MODEL`, `ANALYST_MODEL`, `EMBED_MODEL` if needed.
+`utils/model_config.py` auto-picks model sizes from detected VRAM. Override with env vars `OCR_MODEL`, `ANALYST_MODEL`, `EMBED_MODEL` if needed.
 
 ---
 
 ## NOTEBOOK CELL SUMMARY
 
-The notebook (`insureiq_colab.ipynb`) is 8 cells. Run top-to-bottom; the last one prints the public URL.
+The notebook (`insureiq_colab.ipynb`) is 9 cells. Run top to bottom; the last one prints the public URL.
 
 | Cell | What it does |
 |------|--------------|
 | 1 | GPU + RAM check (`nvidia-smi`, `free -h`). |
 | 2 | `git clone --depth 1 https://github.com/aksri648/INSURE-IQ` into `/content/INSURE-IQ`. |
-| 3 | `apt` libs (`libgl1`, `libglib2.0-0`) + `pip install -r /content/INSURE-IQ/requirements.txt`. |
-| 4 | Install Ollama via `curl -fsSL https://ollama.com/install.sh \| sh`. Start `ollama serve` in the background. Wait until `:11434` responds. |
-| 5 | Detect VRAM. Pull `nomic-embed-text` + (`llava:13b`/`llava:7b`) + (`deepseek-r1:14b`/`deepseek-r1:7b`). Write the resolved names to `/tmp/model_config.env`. |
-| 6 | Set `TAVILY_API_KEY` in `os.environ` and persist to `/content/INSURE-IQ/.env`. **Leave blank to skip Web Research + Company Profile agents.** |
-| 7 | Install `cloudflared` binary from GitHub releases. |
-| 8 | Start Streamlit (background subprocess) → start `cloudflared tunnel --url http://localhost:8501` → parse the printed `https://*.trycloudflare.com` URL → keep the tunnel cell running. |
+| 3 | `apt` libs (`libgl1`, `libglib2.0-0`) + `pip install -r requirements.txt`. |
+| 4 | **Install `tectonic`** (self-contained LaTeX engine) — required to render the final PDF. |
+| 5 | Install Ollama via `curl https://ollama.com/install.sh \| sh`. Start `ollama serve` in the background. Wait until `:11434` responds. |
+| 6 | Detect VRAM. Pull `nomic-embed-text` + (`llava:13b`/`llava:7b`) + (`deepseek-r1:14b`/`deepseek-r1:7b`). Write resolved names to `/tmp/model_config.env`. |
+| 7 | Set `TAVILY_API_KEY` in `os.environ` and persist to `/content/INSURE-IQ/.env`. Required for the Company Profile agent. |
+| 8 | Install `cloudflared` binary from GitHub releases. |
+| 9 | Start Streamlit in background → start `cloudflared tunnel --url http://localhost:8501` → parse the printed `https://*.trycloudflare.com` URL → keep the tunnel cell running. |
 
-Optional keep-alive JS cell can be inserted before Cell 8 to fight Colab's idle timer on free tier.
+Optional keep-alive JS cell can be inserted before Cell 9 to fight Colab's idle timer on free tier.
 
 ---
 
@@ -83,7 +75,7 @@ Optional keep-alive JS cell can be inserted before Cell 8 to fight Colab's idle 
 2. `Runtime → Change runtime type → T4 GPU` (or A100).
 3. `Runtime → Run all`.
 
-Wait for Cell 8 to print:
+Wait for Cell 9 to print:
 
 ```
 ================================================================
@@ -91,47 +83,48 @@ Wait for Cell 8 to print:
 ================================================================
 ```
 
-Open the URL → upload a policy PDF → click **Analyze Policy**.
+Open the URL → drop a policy PDF on the left → click **Analyze Policy** → watch the middle flowchart light up → press **⬇️ Download Report PDF** on the right.
 
-Total cold-start ≈ 15–25 min (mostly model pulls). Each policy analysis runs ~5–15 min depending on PDF length and GPU.
+Total cold start ≈ 15–25 min (mostly model pulls). Each policy analysis runs ~5–15 min depending on PDF length and GPU.
 
 ---
 
 ## WHAT GETS RUN ON COLAB
 
-The notebook clones the repo and runs the project unchanged. Pipeline:
+Pipeline (7 nodes):
 
 ```
-ocr  →  embed_store  →  web_research  →  analyst  →  company_profile  →  compiler  →  END
+ocr → embed_store → web_research → analyst → company_profile → validator → compiler → END
 ```
 
-- **OCR** uses `llava` with `keep_alive=0` to free VRAM before the analyst loads.
-- **Analyst** runs **18 grounded section prompts** with strict JSON schemas, producing the consumer-friendly report template.
-- **Company Profile** issues **7 Tavily `search_depth="advanced"` queries** about the insurer (overview, claim settlement ratio, recent disputes, customer reviews, ratings, market share, credibility) and synthesizes them through DeepSeek R1 into a structured profile + trust score.
-- **Compiler** emits Markdown + structured JSON. Streamlit renders both with download buttons.
+- **OCR** offloads (`keep_alive=0`) before the analyst loads.
+- **Analyst** runs 14 grounded section prompts. Each finding **must** include a `verbatim_quote` that is an exact substring of the cited policy chunk.
+- **Company Profile** issues 7 Tavily advanced searches about the insurer.
+- **Validator** does a deterministic substring check on every finding against the verbatim `chunk_index` (no LLM). Tags TRUSTED / NEEDS_HUMAN_REVIEW; drops anything whose quote isn't in the cited chunk.
+- **Compiler** emits LaTeX → tectonic → PDF. The Streamlit UI shows the LaTeX source on the right and the **Download Report PDF** button.
 
 ---
 
 ## TAVILY KEY HANDLING
 
-Both Tavily-dependent agents (`web_research_agent.py`, `company_profile_agent.py`) check `os.getenv("TAVILY_API_KEY")` at runtime.
+Both Tavily-dependent agents check `os.getenv("TAVILY_API_KEY")` at runtime.
 
 | Key present? | Effect |
 |---|---|
 | ✅ | Web Research runs 2 queries · Company Profile runs 7 queries + LLM synthesis. |
-| ❌ | Both agents short-circuit cleanly with `{"available": false, "reason": "TAVILY_API_KEY not configured"}`. Pipeline still completes. |
+| ❌ | Both agents short-circuit cleanly. Pipeline still completes; Company Profile section in the PDF shows a "not available" note. |
 
-Get a free key at <https://tavily.com>. Paste it into **Cell 6** of the notebook.
+Get a free key at <https://tavily.com>. Paste it into **Cell 7** of the notebook.
 
 ```python
-# Cell 6
+# Cell 7
 import os
 os.environ["TAVILY_API_KEY"] = "tvly-..."
 with open("/content/INSURE-IQ/.env", "w") as f:
     f.write(f"TAVILY_API_KEY={os.environ['TAVILY_API_KEY']}\n")
 ```
 
-`/content/INSURE-IQ/app.py` calls `load_dotenv()` so the subprocess Streamlit child picks up the same key.
+`/content/INSURE-IQ/app.py` calls `load_dotenv()` so the Streamlit subprocess picks up the same key.
 
 ---
 
@@ -156,12 +149,9 @@ Colab Machine                Cloudflare Edge          User's Browser
 
 ### Optional: Named Tunnel (stable URL)
 
-If you want a stable subdomain across restarts:
-
-1. Create a free Cloudflare account at cloudflare.com.
+1. Create a free Cloudflare account.
 2. Run `cloudflared login` in a Colab cell.
-3. Create a named tunnel: `cloudflared tunnel create insureiq`.
-4. Run: `cloudflared tunnel run --url http://localhost:8501 insureiq`.
+3. `cloudflared tunnel create insureiq` → `cloudflared tunnel run --url http://localhost:8501 insureiq`.
 
 ---
 
@@ -171,12 +161,13 @@ If you want a stable subdomain across restarts:
 |------------|--------|------------|
 | Session timeout (free: ~90 min idle) | Pipeline interrupted | Use Colab Pro · enable the keep-alive JS cell |
 | VRAM shared with system | OOM on big PDFs / large models | Use 7B models on T4 (default); sequential offload between OCR and analyst |
-| No persistent storage | ChromaDB lost on restart | Re-upload PDF — embeddings rebuild quickly |
-| Tunnel URL changes on restart | Users lose link | Restart Cell 8 and reshare URL · use a named tunnel for stability |
-| Network egress limits | Slow model pull | Pre-pull models at session start (Cell 5) |
-| Tavily rate limits / no key | Web Research + Company Profile silently skip | Provide a key in Cell 6 |
+| No persistent storage | ChromaDB lost on restart | Re-upload PDF — rebuild is fast |
+| Tunnel URL changes on restart | Users lose link | Restart Cell 9 and reshare URL · use a named tunnel for stability |
+| Network egress limits | Slow model pull | Pre-pull models at session start (Cell 6) |
+| Tavily rate limits / no key | Company Profile silently skips | Provide a key in Cell 7 |
+| tectonic first-run downloads | First PDF compile fetches fonts | Subsequent compiles are fast; cached in `~/.cache/Tectonic/` |
 
-### Keep-Alive Cell (insert before Cell 8 if needed)
+### Keep-Alive Cell (insert before Cell 9 if needed)
 
 ```python
 import IPython
@@ -202,11 +193,13 @@ print("✅ Keep-alive activated")
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `nvidia-smi` not found | CPU runtime | `Runtime → Change runtime type → T4 GPU` |
-| Cell 4 hangs on "Waiting for Ollama..." | install script failed | `tail /tmp/ollama.log` and re-run cell |
-| Cell 5 model pull stalls | network egress throttled | re-run cell · Colab will resume the partial pull |
+| Cell 5 hangs on "Waiting for Ollama..." | install script failed | `tail /tmp/ollama.log` and re-run cell |
+| Cell 6 model pull stalls | network egress throttled | re-run cell · Colab will resume the partial pull |
 | Streamlit returns 502 via tunnel | app still booting | wait 10–15 s and refresh; `tail /tmp/streamlit.log` to inspect |
-| Empty Company Profile tab | `TAVILY_API_KEY` not set | re-run Cell 6 with a valid key, then restart Cell 8 |
-| OOM mid-analysis | analyst model too big | force smaller: `os.environ["ANALYST_MODEL"]="deepseek-r1:7b"` before Cell 8 |
+| Empty Company Profile section in PDF | `TAVILY_API_KEY` not set | re-run Cell 7 with a valid key, then restart Cell 9 |
+| OOM mid-analysis | analyst model too big | force smaller: `os.environ["ANALYST_MODEL"]="deepseek-r1:7b"` before Cell 9 |
+| Download PDF says "LaTeX compiler unavailable" | tectonic install failed | re-run Cell 4 · then restart Cell 9 |
+| Lots of NEEDS HUMAN REVIEW tags | analyst paraphrased instead of quoting | normal on long noisy PDFs; the validator is conservative by design |
 
 ---
 
@@ -217,7 +210,7 @@ The repo also ships `setup.sh` / `run.sh` for local Linux + GPU:
 ```bash
 git clone https://github.com/aksri648/INSURE-IQ.git
 cd INSURE-IQ
-./setup.sh              # installs Ollama + venv + pulls models
+./setup.sh              # installs tectonic + Ollama + venv + pulls models
 echo "TAVILY_API_KEY=tvly-..." > .env
 ./run.sh                # http://localhost:8501
 ```
@@ -232,11 +225,12 @@ See [`README.md`](./README.md) for full local instructions.
 Cell 1  →  GPU + RAM check
 Cell 2  →  git clone https://github.com/aksri648/INSURE-IQ
 Cell 3  →  apt + pip install -r requirements.txt
-Cell 4  →  Install + start Ollama server
-Cell 5  →  Pull models (auto-sized to VRAM)
-Cell 6  →  Set TAVILY_API_KEY (optional but recommended)
-Cell 7  →  Install cloudflared
-Cell 8  →  Launch Streamlit + Cloudflare tunnel → public URL
+Cell 4  →  Install tectonic (LaTeX → PDF)
+Cell 5  →  Install + start Ollama server
+Cell 6  →  Pull models (auto-sized to VRAM)
+Cell 7  →  Set TAVILY_API_KEY (recommended)
+Cell 8  →  Install cloudflared
+Cell 9  →  Launch Streamlit + Cloudflare tunnel → public URL
 ```
 
 Total setup time: ~15–25 min (mostly model download)
@@ -244,5 +238,5 @@ Analysis time per policy: ~5–15 min depending on PDF length and GPU
 
 ---
 
-*InsureIQ · Colab + Cloudflare Deployment Guide · v2.0*
+*InsureIQ · Colab + Cloudflare Deployment Guide · v3.0*
 *Repo: https://github.com/aksri648/INSURE-IQ*

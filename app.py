@@ -1,13 +1,28 @@
-import json
+"""InsureIQ Streamlit UI.
+
+Layout (three columns):
+    LEFT    — PDF upload + Analyze button.
+    MIDDLE  — vertical flowchart of all agents. The active node's border
+              animates while it executes. Completed nodes get a green border.
+    RIGHT   — LaTeX source viewer (read-only) + a single "Download Report PDF"
+              button below the viewer.
+
+The pipeline is run in a background thread so the UI can poll a shared state
+slot and re-render the flowchart as each node completes.
+"""
+
 import os
+import queue
 import sys
 import tempfile
+import threading
+import time
 import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
 
-# Make sure local packages are importable when launched from anywhere
+
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
@@ -16,10 +31,9 @@ load_dotenv()
 
 from utils.model_config import write_model_config  # noqa: E402
 
-# Materialise model config file early so all nodes read consistent values
 write_model_config()
 
-from graph import pipeline  # noqa: E402
+from graph import NODE_LABELS, NODE_ORDER, pipeline  # noqa: E402
 
 
 st.set_page_config(
@@ -28,206 +42,324 @@ st.set_page_config(
     layout="wide",
 )
 
+
+# ── Styles ────────────────────────────────────────────────────────────
+
 st.markdown(
     """
 <style>
   .stApp { background: #0a0e1a; color: #e2e8f0; }
-  .verdict-GOOD_VALUE       { color: #10b981; font-weight: 700; }
-  .verdict-BUY_WITH_CAUTION { color: #f59e0b; font-weight: 700; }
-  .verdict-REVIEW_NEEDED    { color: #ef4444; font-weight: 700; }
-  .verdict-AVOID            { color: #dc2626; font-weight: 900; }
-  .risk-LOW    { color: #10b981; font-weight: 700; }
-  .risk-MEDIUM { color: #f59e0b; font-weight: 700; }
-  .risk-HIGH   { color: #ef4444; font-weight: 700; }
+  .block-container { padding-top: 1.2rem; }
+  h1, h2, h3 { color: #e2e8f0 !important; }
+
+  /* Flowchart node card */
+  .node-card {
+    border: 2px solid #1e293b;
+    background: #0f172a;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 6px 0;
+    color: #cbd5e1;
+    font-weight: 600;
+    text-align: center;
+    transition: all 0.25s ease;
+  }
+  .node-pending   { border-color: #1e293b; color: #64748b; }
+  .node-done      { border-color: #047857; color: #d1fae5;
+                    background: linear-gradient(180deg, #022c22, #0f172a); }
+  .node-active    {
+    border-color: #00d4ff;
+    color: #e0f2fe;
+    background: linear-gradient(180deg, #082f49, #0f172a);
+    box-shadow: 0 0 0 0 rgba(0,212,255,0.7);
+    animation: pulseBorder 1.4s ease-in-out infinite;
+  }
+  @keyframes pulseBorder {
+    0%   { box-shadow: 0 0 0 0 rgba(0,212,255,0.55); border-color: #00d4ff; }
+    50%  { box-shadow: 0 0 0 10px rgba(0,212,255,0); border-color: #38bdf8; }
+    100% { box-shadow: 0 0 0 0 rgba(0,212,255,0); border-color: #00d4ff; }
+  }
+  .node-arrow {
+    text-align: center;
+    color: #475569;
+    font-size: 16px;
+    margin: -2px 0;
+  }
+
+  /* LaTeX viewer */
+  .latex-viewer textarea {
+    background: #0f172a !important;
+    color: #cbd5e1 !important;
+    font-family: 'JetBrains Mono', 'SF Mono', Menlo, monospace !important;
+    font-size: 12px !important;
+  }
+
+  /* Big primary download */
+  div[data-testid="stDownloadButton"] button {
+    background: #00d4ff !important;
+    color: #0a0e1a !important;
+    border: 0 !important;
+    font-weight: 700 !important;
+    border-radius: 8px !important;
+    padding: 0.6rem 1rem !important;
+  }
+  div[data-testid="stDownloadButton"] button:disabled {
+    background: #1e293b !important;
+    color: #475569 !important;
+  }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
+
+# ── Header ────────────────────────────────────────────────────────────
+
 st.markdown("## ⬡ InsureIQ — AI Insurance Policy Analyst")
 st.caption(
-    "Upload any insurance policy PDF for a full cited analysis · Powered by local AI + Tavily company research"
+    "Local multi-agent pipeline with deterministic validator · LaTeX-rendered cited report"
 )
 
-uploaded_file = st.file_uploader(
-    "Upload Insurance Policy PDF",
-    type=["pdf"],
-    help="Your PDF stays on this machine — local Ollama inference only",
-)
 
-if uploaded_file:
-    col1, _, col3 = st.columns([2, 1, 1])
-    with col1:
-        st.info(f"📄 {uploaded_file.name} — {uploaded_file.size // 1024} KB")
-    with col3:
-        if st.button("🔍 Analyze Policy", type="primary", use_container_width=True):
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.read())
-                tmp_path = tmp.name
+# ── Session-state init ────────────────────────────────────────────────
 
-            session_id = str(uuid.uuid4())
-            st.session_state["last_session_id"] = session_id
+def _init_state():
+    defaults = {
+        "completed_nodes": [],
+        "active_node": None,
+        "pipeline_running": False,
+        "pipeline_done": False,
+        "latex_source": "",
+        "pdf_bytes": b"",
+        "final_report": None,
+        "error_msg": "",
+        "events_queue": None,
+        "worker_thread": None,
+        "tmp_pdf_path": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
-            progress_bar = st.progress(0)
-            status_text = st.empty()
 
-            stages = [
-                ("ocr_complete",              "👁  OCR Extraction",          20),
-                ("rag_complete",              "🗄  Building Vector Store",   40),
-                ("web_research_complete",     "🌐  External Research",       55),
-                ("analysis_complete",         "🤖  Deep Section Analysis",   80),
-                ("company_profile_complete",  "🏢  Company Profile",         92),
-                ("complete",                  "📋  Compiling Report",       100),
-            ]
-            stage_map = {s[0]: (s[1], s[2]) for s in stages}
+_init_state()
 
-            initial_state = {
-                "session_id": session_id,
-                "pdf_path": tmp_path,
-                "ocr_text": [],
-                "chunks": [],
-                "insurer_name": "",
-                "external_research": {},
-                "company_profile": {},
-                "section_analyses": {},
-                "final_report": {},
-                "report_markdown": "",
-                "citations": [],
-                "error": None,
-                "status": "starting",
-            }
 
-            status_text.text("🚀 Starting analysis pipeline...")
-            final_state = initial_state
+# ── Pipeline worker ───────────────────────────────────────────────────
 
+def _run_pipeline(initial_state: dict, events: "queue.Queue"):
+    """Run the LangGraph pipeline and push events to the queue."""
+    try:
+        last_state = initial_state
+        for event in pipeline.stream(initial_state):
+            for node_name, node_state in event.items():
+                events.put({"type": "node_done", "node": node_name})
+                last_state = node_state
+        events.put({"type": "complete",
+                    "latex": last_state.get("latex_source", ""),
+                    "pdf": last_state.get("pdf_bytes", b""),
+                    "report": last_state.get("final_report", {})})
+    except Exception as e:
+        events.put({"type": "error", "message": str(e)})
+
+
+def _drain_events():
+    """Pull any queued events into st.session_state."""
+    q = st.session_state.events_queue
+    if q is None:
+        return False
+    changed = False
+    while True:
+        try:
+            ev = q.get_nowait()
+        except queue.Empty:
+            break
+        changed = True
+        if ev["type"] == "node_done":
+            node = ev["node"]
+            if node not in st.session_state.completed_nodes:
+                st.session_state.completed_nodes.append(node)
+            # Active node = next one in order, or None if done
             try:
-                for event in pipeline.stream(initial_state):
-                    for _, node_state in event.items():
-                        current_status = node_state.get("status", "")
-                        if current_status in stage_map:
-                            label, pct = stage_map[current_status]
-                            progress_bar.progress(pct)
-                            status_text.text(f"{label}...")
-                        final_state = node_state
+                idx = NODE_ORDER.index(node)
+                st.session_state.active_node = (
+                    NODE_ORDER[idx + 1] if idx + 1 < len(NODE_ORDER) else None
+                )
+            except ValueError:
+                pass
+        elif ev["type"] == "complete":
+            st.session_state.latex_source = ev["latex"]
+            st.session_state.pdf_bytes = ev["pdf"]
+            st.session_state.final_report = ev["report"]
+            st.session_state.pipeline_done = True
+            st.session_state.pipeline_running = False
+            st.session_state.active_node = None
+        elif ev["type"] == "error":
+            st.session_state.error_msg = ev["message"]
+            st.session_state.pipeline_running = False
+            st.session_state.active_node = None
+    return changed
 
-                progress_bar.progress(100)
-                status_text.text("✅ Analysis complete!")
-                st.session_state["report"] = final_state.get("final_report", {})
-                st.session_state["markdown"] = final_state.get("report_markdown", "")
-            except Exception as e:
-                st.error(f"Pipeline error: {e}")
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
-# ── Report Display ──────────────────────────────────────────────────
-if st.session_state.get("report"):
-    report = st.session_state["report"]
-    markdown = st.session_state.get("markdown", "")
-    headline = report.get("headline", {})
-    session_id = st.session_state.get("last_session_id", "session")
+# ── Three-column layout ───────────────────────────────────────────────
 
-    st.divider()
-    st.markdown("### 📊 Analysis Report")
+col_left, col_mid, col_right = st.columns([1, 1, 2], gap="large")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        score = headline.get("overall_rating", 0)
-        color = (
-            "#10b981" if score >= 75 else "#f59e0b" if score >= 55 else "#ef4444"
-        )
-        st.markdown(
-            f"<h2 style='color:{color};margin:0'>{score}"
-            f"<span style='font-size:14px'>/100</span></h2>",
-            unsafe_allow_html=True,
-        )
-        st.caption("Overall Rating")
-    with col2:
-        verdict = headline.get("recommendation", "UNKNOWN")
-        st.markdown(
-            f"<p class='verdict-{verdict}'>{verdict.replace('_', ' ')}</p>",
-            unsafe_allow_html=True,
-        )
-        st.caption("Recommendation")
-    with col3:
-        risk = headline.get("risk_level", "UNKNOWN")
-        st.markdown(
-            f"<p class='risk-{risk}'>{risk}</p>",
-            unsafe_allow_html=True,
-        )
-        st.caption("Risk Level")
-    with col4:
-        st.metric("Insurer", (headline.get("insurer_name") or "—")[:25])
 
-    tab_report, tab_company, tab_json = st.tabs(
-        ["📄 Full Report", "🏢 Company Profile", "🧾 Raw JSON"]
+# === LEFT: upload ====================================================
+with col_left:
+    st.markdown("### 1 · Upload")
+    uploaded_file = st.file_uploader(
+        "Insurance Policy PDF",
+        type=["pdf"],
+        help="Stays local — no external LLM calls",
     )
 
-    with tab_report:
-        if markdown:
-            st.markdown(markdown)
-        else:
-            st.info("No report content available.")
+    if uploaded_file:
+        st.caption(f"📄 {uploaded_file.name} — {uploaded_file.size // 1024} KB")
 
-    with tab_company:
-        profile = report.get("company_profile", {})
-        if not profile or not profile.get("available"):
-            reason = profile.get("reason") if isinstance(profile, dict) else None
-            st.warning(
-                "Company profile unavailable. "
-                f"{('Reason: ' + reason) if reason else 'Set TAVILY_API_KEY in .env to enable.'}"
+    analyze_disabled = (
+        uploaded_file is None or st.session_state.pipeline_running
+    )
+
+    if st.button("🔍 Analyze Policy",
+                 type="primary",
+                 use_container_width=True,
+                 disabled=analyze_disabled):
+        # Reset run state
+        st.session_state.completed_nodes = []
+        st.session_state.active_node = NODE_ORDER[0]
+        st.session_state.pipeline_running = True
+        st.session_state.pipeline_done = False
+        st.session_state.latex_source = ""
+        st.session_state.pdf_bytes = b""
+        st.session_state.final_report = None
+        st.session_state.error_msg = ""
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(uploaded_file.read())
+            st.session_state.tmp_pdf_path = tmp.name
+
+        initial_state = {
+            "session_id": str(uuid.uuid4()),
+            "pdf_path": st.session_state.tmp_pdf_path,
+            "ocr_text": [],
+            "chunks": [],
+            "chunk_index": {},
+            "insurer_name": "",
+            "external_research": {},
+            "company_profile": {},
+            "section_analyses": {},
+            "validated_sections": {},
+            "validation_report": {},
+            "final_report": {},
+            "latex_source": "",
+            "pdf_bytes": b"",
+            "citations": [],
+            "error": None,
+            "status": "starting",
+            "active_node": "ocr",
+        }
+
+        st.session_state.events_queue = queue.Queue()
+        st.session_state.worker_thread = threading.Thread(
+            target=_run_pipeline,
+            args=(initial_state, st.session_state.events_queue),
+            daemon=True,
+        )
+        st.session_state.worker_thread.start()
+
+    if st.session_state.error_msg:
+        st.error(st.session_state.error_msg)
+
+    if st.session_state.pipeline_done:
+        st.success("Analysis complete.")
+        report = st.session_state.final_report or {}
+        headline = report.get("headline", {}) if isinstance(report, dict) else {}
+        if headline:
+            st.markdown(f"**Insurer:** {headline.get('insurer_name', '—')}")
+            st.markdown(f"**Rating:** {headline.get('overall_rating', '—')}/100")
+            st.markdown(f"**Risk:** {headline.get('risk_level', '—')}")
+            st.markdown(f"**Verdict:** {headline.get('recommendation', '—')}")
+        vr = (report or {}).get("validation_report", {})
+        counts = vr.get("counts", {})
+        if counts:
+            st.caption(
+                f"Validator: {counts.get('trusted', 0)} TRUSTED · "
+                f"{counts.get('review', 0)} NEEDS REVIEW · "
+                f"{counts.get('dropped', 0)} dropped"
             )
-        else:
-            summary = profile.get("summary", {})
-            st.markdown(f"**Insurer:** {profile.get('insurer', 'Unknown')}")
-            st.markdown(f"**Trust Score:** {summary.get('trust_score', '—')}/100")
 
-            for k, label in [
-                ("company_overview",          "Company Overview"),
-                ("claim_settlement_ratio",    "Claim Settlement Ratio"),
-                ("customer_reviews_summary",  "Customer Reviews"),
-                ("ratings",                   "Ratings"),
-                ("market_share",              "Market Share"),
-                ("credibility",               "Credibility"),
-                ("overall_assessment",        "Overall Assessment"),
-            ]:
-                st.markdown(f"#### {label}")
-                st.markdown(summary.get(k, "Not found"))
 
-            disputes = summary.get("recent_disputes") or []
-            if disputes:
-                st.markdown("#### Recent Disputes")
-                for d in disputes:
-                    st.markdown(f"- {d}")
+# === MIDDLE: flowchart ===============================================
+def _node_classes(node: str) -> str:
+    if node == st.session_state.active_node and st.session_state.pipeline_running:
+        return "node-card node-active"
+    if node in st.session_state.completed_nodes:
+        return "node-card node-done"
+    return "node-card node-pending"
 
-            with st.expander("🔗 Sources Consulted (Tavily)"):
-                for facet, body in profile.get("facets", {}).items():
-                    for src in body.get("sources", [])[:3]:
-                        title = src.get("title", "(untitled)")
-                        url = src.get("url", "")
-                        st.markdown(
-                            f"- _{facet.replace('_', ' ').title()}_ — [{title}]({url})"
-                        )
 
-    with tab_json:
-        st.json(report)
+with col_mid:
+    st.markdown("### 2 · Agent Pipeline")
+    chart_html = []
+    for i, node in enumerate(NODE_ORDER):
+        cls = _node_classes(node)
+        label = NODE_LABELS[node]
+        chart_html.append(f'<div class="{cls}">{label}</div>')
+        if i < len(NODE_ORDER) - 1:
+            chart_html.append('<div class="node-arrow">▼</div>')
+    st.markdown("\n".join(chart_html), unsafe_allow_html=True)
 
-    st.divider()
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.download_button(
-            label="⬇️ Download Report (Markdown)",
-            data=markdown.encode("utf-8") if markdown else b"",
-            file_name=f"insureiq_report_{session_id[:8]}.md",
-            mime="text/markdown",
-            disabled=not markdown,
-        )
-    with col_b:
-        st.download_button(
-            label="⬇️ Download Report (JSON)",
-            data=json.dumps(report, indent=2),
-            file_name=f"insureiq_report_{session_id[:8]}.json",
-            mime="application/json",
-        )
+    if st.session_state.pipeline_running:
+        st.caption("Running… the active agent has a glowing border.")
+    elif st.session_state.pipeline_done:
+        st.caption("All agents complete.")
+    else:
+        st.caption("Upload a PDF and press Analyze to start.")
+
+
+# === RIGHT: LaTeX viewer + PDF download ==============================
+with col_right:
+    st.markdown("### 3 · Compiled LaTeX Report")
+    latex_src = st.session_state.latex_source or (
+        "% The LaTeX source for your validated report will appear here\n"
+        "% after the pipeline finishes."
+    )
+    st.markdown('<div class="latex-viewer">', unsafe_allow_html=True)
+    st.text_area(
+        label="LaTeX source",
+        value=latex_src,
+        height=560,
+        disabled=True,
+        label_visibility="collapsed",
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.download_button(
+        label="⬇️ Download Report PDF",
+        data=st.session_state.pdf_bytes or b"",
+        file_name="insureiq_report.pdf",
+        mime="application/pdf",
+        disabled=not st.session_state.pdf_bytes,
+        use_container_width=True,
+    )
+
+
+# ── Live refresh while pipeline is running ────────────────────────────
+
+if st.session_state.pipeline_running:
+    _drain_events()
+    time.sleep(1.0)
+    # Cleanup temp pdf if pipeline finished
+    if st.session_state.pipeline_done and st.session_state.tmp_pdf_path:
+        try:
+            os.unlink(st.session_state.tmp_pdf_path)
+        except OSError:
+            pass
+        st.session_state.tmp_pdf_path = None
+    st.rerun()
+else:
+    # One last drain to catch the final 'complete' event if the rerun beat the queue
+    if _drain_events():
+        st.rerun()

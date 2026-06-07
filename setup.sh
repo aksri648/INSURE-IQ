@@ -9,6 +9,22 @@ cd "$PROJECT_ROOT"
 
 echo "📦 InsureIQ setup starting in: $PROJECT_ROOT"
 
+# ── 0. Tectonic (LaTeX -> PDF) ─────────────────────────────────
+if ! command -v tectonic >/dev/null 2>&1; then
+    echo "⬇️  Installing tectonic (self-contained LaTeX engine)..."
+    if curl -fsSL https://drop-sh.fullyjustified.net -o /tmp/install-tectonic.sh; then
+        sh /tmp/install-tectonic.sh </dev/null || echo "⚠️  tectonic install script failed"
+        if [ -x ./tectonic ]; then
+            sudo mv ./tectonic /usr/local/bin/tectonic 2>/dev/null || mv ./tectonic "$HOME/.local/bin/tectonic"
+        fi
+    fi
+fi
+if command -v tectonic >/dev/null 2>&1; then
+    echo "✅ tectonic available: $(tectonic --version 2>&1 | head -1)"
+else
+    echo "ℹ️  tectonic not installed — falling back to pdflatex / reportlab notice PDF."
+fi
+
 # ── 1. Ollama ───────────────────────────────────────────────────
 if ! command -v ollama >/dev/null 2>&1; then
     echo "⬇️  Installing Ollama..."
