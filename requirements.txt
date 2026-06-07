@@ -1,0 +1,14 @@
+streamlit>=1.32
+langgraph>=0.2
+langchain>=0.2
+langchain-community>=0.2
+langchain-ollama>=0.1
+ollama>=0.3
+chromadb>=0.5
+pymupdf>=1.24
+tavily-python>=0.5
+python-dotenv>=1.0
+Pillow>=10.0
+reportlab>=4.0
+nest-asyncio>=1.6
+requests>=2.31
