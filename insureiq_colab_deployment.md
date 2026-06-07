@@ -61,7 +61,7 @@ The notebook (`insureiq_colab.ipynb`) is 9 cells. Run top to bottom; the last on
 | 4 | **Install `tectonic`** (self-contained LaTeX engine) — required to render the final PDF. |
 | 5 | Install Ollama via `curl https://ollama.com/install.sh \| sh`. Start `ollama serve` in the background. Wait until `:11434` responds. |
 | 6 | Detect VRAM. Pull `nomic-embed-text` + (`llava:13b`/`llava:7b`) + (`deepseek-r1:14b`/`deepseek-r1:7b`). Write resolved names to `/tmp/model_config.env`. |
-| 7 | Set `TAVILY_API_KEY` in `os.environ` and persist to `/content/INSURE-IQ/.env`. Required for the Company Profile agent. |
+| 7 | **Load `TAVILY_API_KEY` from Colab Secrets** via `google.colab.userdata.get("TAVILY_API_KEY")` and persist to `/content/INSURE-IQ/.env`. The key is never printed in plain text — only a masked preview (`tvly-x…ab`). |
 | 8 | Install `cloudflared` binary from GitHub releases. |
 | 9 | Start Streamlit in background → start `cloudflared tunnel --url http://localhost:8501` → parse the printed `https://*.trycloudflare.com` URL → keep the tunnel cell running. |
 
@@ -114,17 +114,26 @@ Both Tavily-dependent agents check `os.getenv("TAVILY_API_KEY")` at runtime.
 | ✅ | Web Research runs 2 queries · Company Profile runs 7 queries + LLM synthesis. |
 | ❌ | Both agents short-circuit cleanly. Pipeline still completes; Company Profile section in the PDF shows a "not available" note. |
 
-Get a free key at <https://tavily.com>. Paste it into **Cell 7** of the notebook.
+### Adding the key as a Colab Secret (recommended)
+
+Cell 7 reads the key from **Colab Secrets** so it's not pasted into the notebook source or saved with the file.
+
+1. Click the **🔑 key icon** in the left sidebar of Colab to open the *Secrets* panel.
+2. Click **+ Add new secret**.
+3. **Name:** `TAVILY_API_KEY`
+4. **Value:** your `tvly-…` key from <https://tavily.com>.
+5. Toggle **Notebook access** on for this notebook.
+
+Then run Cell 7. It fetches the secret via:
 
 ```python
-# Cell 7
-import os
-os.environ["TAVILY_API_KEY"] = "tvly-..."
-with open("/content/INSURE-IQ/.env", "w") as f:
-    f.write(f"TAVILY_API_KEY={os.environ['TAVILY_API_KEY']}\n")
+from google.colab import userdata
+TAVILY_API_KEY = userdata.get("TAVILY_API_KEY")
 ```
 
-`/content/INSURE-IQ/app.py` calls `load_dotenv()` so the Streamlit subprocess picks up the same key.
+… and writes it to `/content/INSURE-IQ/.env`. Only a masked preview (`tvly-x…ab`) is printed. `app.py` calls `load_dotenv()` so the Streamlit subprocess picks up the same key.
+
+If the secret is missing or notebook access is disabled, Cell 7 prints a hint and the pipeline still completes — the Tavily-dependent agents skip cleanly.
 
 ---
 
@@ -196,7 +205,7 @@ print("✅ Keep-alive activated")
 | Cell 5 hangs on "Waiting for Ollama..." | install script failed | `tail /tmp/ollama.log` and re-run cell |
 | Cell 6 model pull stalls | network egress throttled | re-run cell · Colab will resume the partial pull |
 | Streamlit returns 502 via tunnel | app still booting | wait 10–15 s and refresh; `tail /tmp/streamlit.log` to inspect |
-| Empty Company Profile section in PDF | `TAVILY_API_KEY` not set | re-run Cell 7 with a valid key, then restart Cell 9 |
+| Empty Company Profile section in PDF | `TAVILY_API_KEY` missing from Colab Secrets, or notebook access not granted | open the 🔑 Secrets panel, add `TAVILY_API_KEY`, toggle "Notebook access", then re-run Cell 7 and restart Cell 9 |
 | OOM mid-analysis | analyst model too big | force smaller: `os.environ["ANALYST_MODEL"]="deepseek-r1:7b"` before Cell 9 |
 | Download PDF says "LaTeX compiler unavailable" | tectonic install failed | re-run Cell 4 · then restart Cell 9 |
 | Lots of NEEDS HUMAN REVIEW tags | analyst paraphrased instead of quoting | normal on long noisy PDFs; the validator is conservative by design |
@@ -228,7 +237,7 @@ Cell 3  →  apt + pip install -r requirements.txt
 Cell 4  →  Install tectonic (LaTeX → PDF)
 Cell 5  →  Install + start Ollama server
 Cell 6  →  Pull models (auto-sized to VRAM)
-Cell 7  →  Set TAVILY_API_KEY (recommended)
+Cell 7  →  Load TAVILY_API_KEY from Colab Secrets (recommended)
 Cell 8  →  Install cloudflared
 Cell 9  →  Launch Streamlit + Cloudflare tunnel → public URL
 ```
