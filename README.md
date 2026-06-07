@@ -1,244 +1,103 @@
 # ⬡ InsureIQ — AI Insurance Policy Analyst
 
-**Local-first, hallucination-proof multi-agent RAG pipeline. Upload an insurance policy PDF, get a fully-cited LaTeX-compiled PDF report with every finding tagged TRUSTED or NEEDS HUMAN REVIEW by a deterministic validator agent.**
+**Upload an insurance policy PDF. Get a fully cited, hallucination-proof consumer report as a typeset PDF.**
 
-Built on **LangGraph · Ollama · ChromaDB · Tavily · Streamlit · Tectonic (LaTeX→PDF)**.
+100 % local LLM inference. A deterministic validator agent confirms every claim against the policy text, so nothing the LLM says reaches the report unless a real run of characters in the policy backs it up.
 
-- 100% local LLM inference; PDF never leaves the host.
-- **7 LangGraph nodes**, sequential VRAM-safe model loading.
-- **Validator agent** does a deterministic substring check on every analyst claim against the policy text — no LLM in the verification loop, so the validator itself cannot hallucinate.
-- Final report is rendered as **LaTeX → PDF**. The Streamlit UI shows the source on the right and exposes a single **Download Report PDF** button.
-- Tavily-powered **Company Profile** agent: claim settlement ratio, recent disputes, customer reviews, ratings, market share, credibility, trust score.
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb)
 
-📓 Run it on Colab + Cloudflare Tunnel:
-**[Open `insureiq_colab.ipynb` in Colab](https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb)** — full guide in [`insureiq_colab_deployment.md`](./insureiq_colab_deployment.md).
+📘 **Deep dive:** [`project-documentation.md`](./project-documentation.md) — architecture, every agent, prompts, validator algorithm, LaTeX schema, ops.
+🏗 **Architecture diagram:** [`insureiq_architecture_diagram.md`](./insureiq_architecture_diagram.md)
+☁️ **Colab + Cloudflare deployment:** [`insureiq_colab_deployment.md`](./insureiq_colab_deployment.md)
 
 ---
 
-## Pipeline at a Glance
+## What it does
 
-```
-PDF
- ▼
-[OCR Agent]              llava → per-page JSON → offload
- ▼
-[RAG Indexer]            clause chunk → nomic-embed → ChromaDB + chunk_index
- ▼
-[Web Research]           Tavily light lookups (insurer, regulatory)
- ▼
-[Analyst Agent]          deepseek-r1 → verifiable findings only
-                         each finding ships a verbatim_quote + chunk_id
- ▼
-[Company Profile] ★      Tavily ×7 facets → LLM synthesis → trust score
- ▼
-[Validator Agent] ★      Deterministic substring check on every claim.
-                         Tags each finding TRUSTED or NEEDS_HUMAN_REVIEW.
-                         Drops findings whose quote isn't in the policy.
- ▼
-[Report Compiler]        LaTeX source → tectonic → PDF bytes
- ▼
-Streamlit UI             Left: upload · Middle: live agent flowchart
-                         Right: LaTeX viewer + Download Report PDF
-```
-
-For the full architecture see [`insureiq_architecture_diagram.md`](./insureiq_architecture_diagram.md).
+- Runs **7 LangGraph agents** sequentially on your machine:
+  `OCR → RAG → Web Research → Analyst → Company Profile → Validator → Compiler`
+- **Validator agent** does a deterministic substring check on every analyst claim against the policy text. Tags each finding **TRUSTED** ✅ or **NEEDS HUMAN REVIEW** ⚠️. Drops anything fabricated.
+- Compiles the report as **LaTeX → PDF** with `tectonic`. Inline coloured trust tags + verbatim quotes + page references on every finding.
+- A **Tavily-powered Company Profile** agent appends an insurer dossier: claim settlement ratio, recent disputes, customer reviews, ratings, market share, credibility, trust score, source URLs.
+- **Streamlit UI**: left = upload, middle = live agent flowchart (active node glows cyan), right = LaTeX viewer + single **⬇ Download Report PDF** button.
 
 ---
 
-## Hallucination Defense
+## Quick start — Google Colab (recommended)
 
-The system is designed so that no LLM output reaches the report unless it can be tied to a real piece of policy text:
+1. Click **Open in Colab** above.
+2. `Runtime → Change runtime type → T4 GPU`.
+3. Open the **🔑 Secrets** panel in the left sidebar and add `TAVILY_API_KEY` with notebook access (get a free key at <https://tavily.com>).
+4. `Runtime → Run all`.
 
-| Stage | Constraint |
-|---|---|
-| Analyst prompt | Returns findings only. Each finding **must** include `verbatim_quote` (an exact substring of the cited chunk) + `chunk_id` + `page`. No free-form prose fields. |
-| Analyst parsing | Findings missing `chunk_id`, `verbatim_quote`, or with an unknown label are dropped before they reach validation. |
-| Validator | Pure Python. Normalises whitespace and case, then checks if `verbatim_quote` is literally inside the cited chunk. **No LLM call here** — the verifier itself cannot hallucinate. |
-| Tagging | **TRUSTED**: exact substring match + page consistency. **NEEDS_HUMAN_REVIEW**: only fuzzy word-overlap match (≥70%), or page mismatch. **Dropped**: quote not in the cited chunk at all. |
-| Compiler | Only consumes validated findings. Each finding renders the original verbatim quote in italics under the consumer-facing claim, plus a coloured TRUSTED / NEEDS HUMAN REVIEW tag and the chunk/page reference. |
+After ~15–25 min of setup, Cell 9 prints a public `https://*.trycloudflare.com` URL. Open it, drop a PDF, watch the flowchart light up, download the report.
 
-The result: any line in the PDF either matches a real run of characters in the policy, or it has a visible amber tag warning the reader to verify it manually.
+Full guide: [`insureiq_colab_deployment.md`](./insureiq_colab_deployment.md).
 
 ---
 
-## Project Layout
+## Quick start — local
 
-```
-ai_insurance/
-├── agents/
-│   ├── state.py                    # PolicyState TypedDict
-│   ├── ocr_agent.py                # LLaVA → per-page JSON → offload
-│   ├── rag_agent.py                # Chunker + ChromaDB + chunk_index
-│   ├── web_research_agent.py       # Insurer name + light Tavily
-│   ├── analyst_agent.py            # Verifiable-only findings
-│   ├── company_profile_agent.py    # Tavily ×7 facets + LLM synthesis
-│   ├── validator_agent.py          # ★ Deterministic verification
-│   └── compiler_agent.py           # LaTeX builder + tectonic
-├── utils/
-│   ├── model_config.py             # VRAM-aware model selection
-│   └── pdf_builder.py              # ★ tectonic / pdflatex / reportlab fallback
-├── graph.py                        # LangGraph wiring (7 nodes)
-├── app.py                          # Streamlit UI (3 columns + live flowchart)
-├── requirements.txt
-├── setup.sh                        # Ollama + tectonic + venv + deps
-├── run.sh                          # Launch Streamlit
-├── insureiq_colab.ipynb            # Colab + Cloudflare Tunnel notebook
-├── insureiq_colab_deployment.md
-├── insureiq_architecture_diagram.md
-└── README.md
-```
-
----
-
-## Streamlit UI
-
-Three columns:
-
-| Column | Contents |
-|---|---|
-| **Left** | PDF upload + **Analyze Policy** button. Once complete, shows insurer / rating / risk / verdict + the validator counts. |
-| **Middle** | Vertical agent flowchart — one rounded box per node. The currently-executing node has a **glowing animated cyan border**. Completed nodes turn green. Pending nodes stay grey. |
-| **Right** | Read-only **LaTeX source viewer** + a single **⬇️ Download Report PDF** button below it. No markdown view, no JSON view — just the compiled PDF you'll actually share. |
-
----
-
-## Run It Locally
-
-Requires: Linux, Python 3.10+, NVIDIA GPU with recent driver, `curl`, `git`.
-
-### 1. One-time setup
+Requires Linux, Python 3.10+, NVIDIA GPU, `curl`, `git`.
 
 ```bash
 git clone https://github.com/aksri648/INSURE-IQ.git
 cd INSURE-IQ
-./setup.sh
+./setup.sh                              # tectonic + Ollama + models + venv
+echo "TAVILY_API_KEY=tvly-..." > .env   # optional (else profile is skipped)
+./run.sh                                # http://localhost:8501
 ```
-
-`setup.sh` will:
-- Install **tectonic** (self-contained LaTeX engine) — required to render the PDF.
-- Install Ollama and start the server on `:11434`.
-- Pull VRAM-sized models:
-  - `> 35 GiB`: `llava:13b` + `deepseek-r1:14b` + `nomic-embed-text`
-  - otherwise: `llava:7b`  + `deepseek-r1:7b`  + `nomic-embed-text`
-- Create `.venv`, install `requirements.txt`, write `/tmp/model_config.env`.
-- Scaffold `.env` from `.env.example`.
-
-### 2. (Recommended) Add your Tavily key
-
-```
-# .env
-TAVILY_API_KEY=tvly-xxxxxxxxxxxx
-```
-
-Without it, the Web Research and Company Profile agents short-circuit cleanly.
-
-### 3. Launch
-
-```bash
-./run.sh
-```
-
-Open <http://localhost:8501> → drop a PDF → click **Analyze Policy** → watch the flowchart light up → press **Download Report PDF**.
 
 ---
 
-## Manual Setup (skip `setup.sh`)
+## How the validator stops hallucinations
 
-```bash
-# 1. tectonic (LaTeX → PDF)
-curl -fsSL https://drop-sh.fullyjustified.net | sh
-sudo mv tectonic /usr/local/bin/
+The analyst is constrained to emit **only structured findings**, each carrying a `verbatim_quote` field — an exact substring of the cited chunk.
 
-# 2. Ollama
-curl -fsSL https://ollama.com/install.sh | sh
-nohup ollama serve >/tmp/ollama.log 2>&1 &
-ollama pull nomic-embed-text
-ollama pull llava:7b
-ollama pull deepseek-r1:7b
+The validator is **pure Python, no LLM**:
 
-# 3. Python
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 4. Optional: Tavily
-echo "TAVILY_API_KEY=tvly-..." > .env
-
-# 5. Run
-streamlit run app.py
+```python
+if normalize(quote) in normalize(chunk.text):
+    → TRUSTED   if page matches
+    → NEEDS_HUMAN_REVIEW  if page mismatch
+elif word_overlap_ratio(quote, chunk.text) >= 0.70:
+    → NEEDS_HUMAN_REVIEW  (paraphrased)
+else:
+    → DROP  (not in the policy)
 ```
 
-If `tectonic` is unavailable the compiler falls back to `pdflatex`, and if neither is available it produces a notice PDF (via reportlab) that contains the LaTeX source — the Download button always returns something.
+A pure-string verifier cannot be fluent-talked into approving an invented clause. The PDF includes a **"How to Read This Report"** legend on the first page explaining the tags to the consumer.
+
+Details + the full per-section schema are in [`project-documentation.md`](./project-documentation.md).
 
 ---
 
-## The Report
-
-Every analysis produces the same structured LaTeX document, rendered identically to a markdown viewer:
+## Repository layout
 
 ```
-Your Insurance Policy Review
-  Quick Summary  → At a Glance · Key Takeaways
-Basic Policy Information
-What Is Covered?
-How Much Protection Do You Actually Get?
-What Is NOT Covered?
-When Does Coverage Start?            (waiting periods)
-What Costs Will You Still Pay Yourself?
-Is the Premium Worth It?
-How Does the Claim Process Work?
-Can the Policy Be Renewed or Cancelled?
-Important Legal Terms You Should Know
-Important Definitions That Could Affect Claims
-Potential Risks and Concerns
-How Likely Is a Claim to Be Rejected?
-Hidden Surprises We Found
-Final Verdict
-  Detailed Scores · Overall Rating · Risk · Confidence · Recommendation
-Company Profile  ★  (Tavily research)
-  Overview · CSR · Disputes · Reviews · Ratings · Market Share ·
-  Credibility · Overall Assessment · Trust Score · Sources Consulted
+INSURE-IQ/
+├── agents/                       # 7 LangGraph nodes
+│   ├── state.py                  #   PolicyState TypedDict
+│   ├── ocr_agent.py              #   LLaVA → JSON
+│   ├── rag_agent.py              #   chunk + embed + chunk_index
+│   ├── web_research_agent.py     #   light Tavily side context
+│   ├── analyst_agent.py          #   verifiable findings only
+│   ├── company_profile_agent.py  #   Tavily ×7 facets + LLM synth
+│   ├── validator_agent.py        # ★ deterministic verification
+│   └── compiler_agent.py         #   LaTeX builder
+├── utils/
+│   ├── model_config.py           # VRAM-aware model picker
+│   └── pdf_builder.py            # tectonic → pdflatex → reportlab
+├── graph.py                      # LangGraph wiring
+├── app.py                        # Streamlit (3 columns + flowchart)
+├── insureiq_colab.ipynb          # Colab + Cloudflare Tunnel notebook
+├── setup.sh / run.sh             # local setup + launch
+├── requirements.txt
+├── project-documentation.md      # ← full reference
+├── insureiq_architecture_diagram.md
+├── insureiq_colab_deployment.md
+└── README.md                     # ← you are here
 ```
-
-### Inline tag styling
-
-Each finding renders like:
-
-```
-• Pre-existing diseases are excluded for 48 months from inception.
-  [TRUSTED] [CIT-007 • chunk_0042 • Page 12 • General Exclusions]
-  "pre-existing diseases excluded for 48 months from inception"
-```
-
-vs. an unverifiable one:
-
-```
-• Maternity benefits are available after 24 months.
-  [NEEDS HUMAN REVIEW] [CIT-018 • chunk_0061 • Page 21]
-  "maternity benefit after twenty four month wait"
-  Reviewer note: Quote paraphrased (62% word overlap)
-```
-
-The PDF's "How to Read This Report" section explains the legend to the consumer.
-
-### Verdict bands
-
-| Overall Rating | Recommendation     | Risk Level |
-|---|---|---|
-| 75–100 | `GOOD VALUE`        | `LOW`    |
-| 55–74  | `BUY WITH CAUTION`  | `MEDIUM` |
-| 35–54  | `REVIEW NEEDED`     | `HIGH`   |
-| 0–34   | `AVOID`             | `HIGH`   |
-
-Confidence is computed from the validator's TRUSTED ratio:
-
-| Trusted/Total | Confidence |
-|---|---|
-| ≥ 0.8 | `HIGH` |
-| ≥ 0.5 | `MEDIUM` |
-| < 0.5 | `LOW` |
-
-The overall rating is also penalised (up to −15) when many findings need review.
 
 ---
 
@@ -246,24 +105,29 @@ The overall rating is also penalised (up to −15) when many findings need revie
 
 | Env var | Purpose | Default |
 |---|---|---|
-| `TAVILY_API_KEY` | Enables Web Research + Company Profile | unset → both skipped |
-| `OCR_MODEL` | Override OCR model | auto from VRAM |
-| `ANALYST_MODEL` | Override analyst model | auto from VRAM |
-| `EMBED_MODEL` | Override embedding model | `nomic-embed-text` |
-| `INSUREIQ_MODEL_CONFIG` | Path to resolved-model config file | `/tmp/model_config.env` |
-
-`.env` is loaded by `app.py` via `python-dotenv`.
+| `TAVILY_API_KEY` | Enables Web Research + Company Profile (on Colab, read from Secrets) | unset → both skip |
+| `OCR_MODEL` / `ANALYST_MODEL` / `EMBED_MODEL` | Override auto-picked models | auto from VRAM |
+| `INSUREIQ_MODEL_CONFIG` | Path to resolved-model config | `/tmp/model_config.env` |
 
 ---
 
 ## Privacy
 
-- Policy PDFs never leave the host.
+- PDFs never leave the host. All inference is local Ollama.
 - ChromaDB is in-memory and per-session.
-- Tavily receives only the heuristically extracted insurer name + canned query templates — never policy text.
+- Tavily receives only the insurer name + canned query templates, never policy text.
+- On Colab, `TAVILY_API_KEY` is read from Colab Secrets — not hard-coded in the notebook.
 
 ---
 
-## Repo
+## License
 
-<https://github.com/aksri648/INSURE-IQ>
+See repo for licensing details.
+
+## Links
+
+- **Repo:** <https://github.com/aksri648/INSURE-IQ>
+- **Project documentation:** [`project-documentation.md`](./project-documentation.md)
+- **Architecture diagram:** [`insureiq_architecture_diagram.md`](./insureiq_architecture_diagram.md)
+- **Colab deployment guide:** [`insureiq_colab_deployment.md`](./insureiq_colab_deployment.md)
+- **Open in Colab:** <https://colab.research.google.com/github/aksri648/INSURE-IQ/blob/main/insureiq_colab.ipynb>
